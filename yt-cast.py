@@ -15,8 +15,10 @@ logging.basicConfig(level = logging.INFO)
 os.makedirs('data', exist_ok=True)
 app = flask.Flask(__name__)
 
+CUTOFF = {'days': 7}
+DOWNLOAD_QUEUE = []
 CONFIG_FILE = 'config.json'
-CACHE_TTL = 1
+CACHE_TTL = 6*60*60 # 6 hours
 YDL_OPTS = {
     'format': 'worstaudio/worst',
     'keepvideo': True,
@@ -41,8 +43,46 @@ def path_for(url):
     hash = hashlib.md5(url.encode()).hexdigest()
     return f'data/{hash}.json'
 
+# Download a single youtube video
+def download_thread():
+    # Prepopulate with any missing videos
+    logging.info('Prepopulating download queue')
+    for key in config:
+        for url in config[key]:
+            path = path_for(url)
+            if not os.path.exists(path):
+                continue
+
+            with open(path, 'r') as fin:
+                info = json.load(fin)
+                if 'entries' in info:
+                    for entry in info['entries']:
+                        DOWNLOAD_QUEUE.append(entry['id'])
+                else:
+                    DOWNLOAD_QUEUE.append(info['id'])
+
+    # Download loop
+    while True:
+        while DOWNLOAD_QUEUE:
+            id = DOWNLOAD_QUEUE.pop()
+            logging.info(f'Download queue [{len(DOWNLOAD_QUEUE)}]: {id}')
+
+            url = f'https://www.youtube.com/watch?v={id}'
+            path = path_for(url)
+            if os.path.exists(path):
+                continue
+
+            logging.info(f'Downloading video at {url}')
+            with youtube_dl.YoutubeDL(YDL_OPTS) as ydl:
+                ydl.extract_info(url, download=True)
+
+        time.sleep(60)
+
 # A thread to download information on the requested URLs periodically
-def update():
+def update_thread():
+    # Update the cutoff threshold
+    cutoff_date = (datetime.date.today() - datetime.timedelta(**CUTOFF)).strftime('%Y%m%d')
+
     # Update once a minute, but caches will probably mostly be used
     while True:
         with open(CONFIG_FILE, 'r') as fin:
@@ -57,15 +97,23 @@ def update():
                     logging.info(f'Fetching {url}')
                     try:
                         with youtube_dl.YoutubeDL(YDL_OPTS) as ydl:
-                            info = ydl.extract_info(url, download=True)
+                            info = ydl.extract_info(url, download=False)
                             with open(path, 'w') as fout:
                                 json.dump(info, fout)
+
+                            # Queue downloads for all videos (existing ones will be skipped)
+                            if 'entries' in info:
+                                for entry in info['entries']:
+                                    if entry['upload_date'] >= cutoff_date:
+                                        DOWNLOAD_QUEUE.append(entry['id'])
+                            else:
+                                if info['upload_date'] >= cutoff_date:
+                                    DOWNLOAD_QUEUE.append(info['id'])
+
                     except Exception as ex:
                         logging.error(f'Failed to fetch {url}: {ex}')
 
         time.sleep(60)
-
-threading.Thread(target=update, daemon=True).start()
 
 @app.route('/<key>.xml')
 def podcast(key):
@@ -73,12 +121,15 @@ def podcast(key):
 
     for url in config[key]:
         path = path_for(url)
+        if not os.path.exists(path):
+            continue
+
         with open(path, 'r') as fin:
-            data = json.load(fin)
-            if 'entries' in data:
-                entries += data['entries']
+            info = json.load(fin)
+            if 'entries' in info:
+                entries += info['entries']
             else:
-                entries.append(data)
+                entries.append(info)
 
     entries = list(reversed(sorted(entries, key=lambda entry: entry['upload_date'])))
 
@@ -96,4 +147,7 @@ def episode(id):
     return flask.send_file(f'data/{id}.mp3')
 
 if __name__ == '__main__':
+    threading.Thread(target=download_thread, daemon=True).start()
+    threading.Thread(target=update_thread, daemon=True).start()
+
     app.run(host = '0.0.0.0')
