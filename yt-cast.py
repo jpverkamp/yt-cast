@@ -15,7 +15,7 @@ logging.basicConfig(level = logging.INFO)
 os.makedirs('data', exist_ok=True)
 app = flask.Flask(__name__)
 
-CUTOFF = {'days': 7}
+CUTOFF = {'weeks': 12}
 DOWNLOAD_QUEUE = []
 CONFIG_FILE = 'config.json'
 CACHE_TTL = 6*60*60 # 6 hours
@@ -42,6 +42,10 @@ def format_date(date):
 def path_for(url):
     hash = hashlib.md5(url.encode()).hexdigest()
     return f'data/{hash}.json'
+
+# When we should return history back to
+def cutoff():
+    return (datetime.date.today() - datetime.timedelta(**CUTOFF)).strftime('%Y%m%d')
 
 # Download a single youtube video
 def download_thread():
@@ -80,9 +84,6 @@ def download_thread():
 
 # A thread to download information on the requested URLs periodically
 def update_thread():
-    # Update the cutoff threshold
-    cutoff_date = (datetime.date.today() - datetime.timedelta(**CUTOFF)).strftime('%Y%m%d')
-
     # Update once a minute, but caches will probably mostly be used
     while True:
         with open(CONFIG_FILE, 'r') as fin:
@@ -104,10 +105,10 @@ def update_thread():
                             # Queue downloads for all videos (existing ones will be skipped)
                             if 'entries' in info:
                                 for entry in info['entries']:
-                                    if entry['upload_date'] >= cutoff_date:
+                                    if entry['upload_date'] >= cutoff():
                                         DOWNLOAD_QUEUE.append(entry['id'])
                             else:
-                                if info['upload_date'] >= cutoff_date:
+                                if info['upload_date'] >= cutoff():
                                     DOWNLOAD_QUEUE.append(info['id'])
 
                     except Exception as ex:
@@ -128,10 +129,10 @@ def podcast(key):
             info = json.load(fin)
             if 'entries' in info:
                 for entry in info['entries']:
-                    if entry['upload_date'] >= cutoff_date:
+                    if entry['upload_date'] >= cutoff():
                         entries.append(entry)
             else:
-                if info['upload_date'] >= cutoff_date:
+                if info['upload_date'] >= cutoff():
                     entries.append(info)
 
     entries = list(reversed(sorted(entries, key=lambda entry: entry['upload_date'])))
