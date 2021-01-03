@@ -1,5 +1,8 @@
 import datetime
 import email.utils
+import hashlib
+import json
+import fileinput
 import flask
 import logging
 import threading
@@ -12,9 +15,11 @@ logging.basicConfig(level = logging.INFO)
 os.makedirs('data', exist_ok=True)
 app = flask.Flask(__name__)
 
-CACHE_TTL = 10*60
+CONFIG_FILE = 'config.json'
+CACHE_TTL = 1
 YDL_OPTS = {
     'format': 'worstaudio/worst',
+    'keepvideo': True,
     'postprocessors': [{
         'key': 'FFmpegExtractAudio',
         'preferredcodec': 'mp3',
@@ -23,69 +28,72 @@ YDL_OPTS = {
     'outtmpl': 'data/%(id)s.%(ext)s',
 }
 
-def fetch(url):
-    if not hasattr(fetch, 'threads'):
-        fetch.threads = {}
+# Initial load config
+with open(CONFIG_FILE, 'r') as fin:
+    config = json.load(fin)
 
-    def t():
-        logging.info(f'Downloading {url}...')
-
-        with youtube_dl.YoutubeDL(YDL_OPTS) as ydl:
-            ydl.extract_info(url, download=True)
-
-        logging.info(f'Finished {url}')
-
-    if url not in fetch.threads:
-        fetch.threads[url] = threading.Thread(target = t)
-        fetch.threads[url].start()
-
+# Helper function to turn youtube dates into podcast dates
 def format_date(date):
     return email.utils.format_datetime(datetime.datetime(year=int(date[0:4]), month=int(date[4:6]), day=int(date[6:8])))
 
-@app.route('/')
-def home():
-    return 'ok'
+# Get the cache file for a url
+def path_for(url):
+    hash = hashlib.md5(url.encode()).hexdigest()
+    return f'data/{hash}.json'
 
-@app.route('/podcast.xml')
-def podcast():
-    if not hasattr(podcast, 'cache'):
-        podcast.cache = {}
+# A thread to download information on the requested URLs periodically
+def update():
+    # Update once a minute, but caches will probably mostly be used
+    while True:
+        with open(CONFIG_FILE, 'r') as fin:
+            config = json.load(fin)
 
-    url = flask.request.args['url']
+        for key in config:
+            for url in config[key]:
+                path = path_for(url)
 
-    # Spawn a download thread
-    fetch(url)
+                # If we don't have the metadata (or an update in the last hour), download it
+                if not os.path.exists(path) or os.path.getmtime(path) + CACHE_TTL < time.time():
+                    logging.info(f'Fetching {url}')
+                    try:
+                        with youtube_dl.YoutubeDL(YDL_OPTS) as ydl:
+                            info = ydl.extract_info(url, download=True)
+                            with open(path, 'w') as fout:
+                                json.dump(info, fout)
+                    except Exception as ex:
+                        logging.error(f'Failed to fetch {url}: {ex}')
 
-    # Get the info to generate the feed xml
-    # Cache automatically
-    if url in podcast.cache and podcast.cache['url'][0] >= time.time():
-        logging.info(f'Loaded {url} info from cache')
-        info = podcast.cache[url]
-    else:
-        logging.info(f'Not cached: {url}, fetching')
-        with youtube_dl.YoutubeDL({}) as ydl:
-            info = ydl.extract_info(url, download=False)
-            podcast.cache[url] = (time.time() + CACHE_TTL, info)
-   
+        time.sleep(60)
+
+threading.Thread(target=update, daemon=True).start()
+
+@app.route('/<key>.xml')
+def podcast(key):
+    entries = []
+
+    for url in config[key]:
+        path = path_for(url)
+        with open(path, 'r') as fin:
+            data = json.load(fin)
+            if 'entries' in data:
+                entries += data['entries']
+            else:
+                entries.append(data)
+
+    entries = list(reversed(sorted(entries, key=lambda entry: entry['upload_date'])))
+
     # Generate the XML
     return flask.Response(
-        flask.render_template('podcast.xml', url = url, info = info, format_date = format_date),
+        flask.render_template('podcast.xml', key = key, entries = entries, format_date = format_date),
         mimetype='application/atom+xml'
     )
 
 @app.route('/<id>.mp3')
 def episode(id):
-    url = f'https://www.youtube.com/watch?v={id}'
+    if not re.match(r'^[a-zA-Z0-9_-]+$', id):
+        raise Exception('Close but no cigar')
 
-    # If the file already exists, just send it
-    mp3_filename = f'data/{id}.mp3'
-    if os.path.exists(mp3_filename):
-        return flask.send_file(mp3_filename)
-
-    # Otherwise, start a download thread, start a redirect loop on the client
-    fetch(url)
-    time.sleep(30)
-    return flask.redirect(flask.request.url)
+    return flask.send_file(f'data/{id}.mp3')
 
 if __name__ == '__main__':
     app.run(host = '0.0.0.0')
