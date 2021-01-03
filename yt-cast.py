@@ -127,9 +127,12 @@ def podcast(key):
         with open(path, 'r') as fin:
             info = json.load(fin)
             if 'entries' in info:
-                entries += info['entries']
+                for entry in info['entries']:
+                    if entry['upload_date'] >= cutoff_date:
+                        entries.append(entry)
             else:
-                entries.append(info)
+                if info['upload_date'] >= cutoff_date:
+                    entries.append(info)
 
     entries = list(reversed(sorted(entries, key=lambda entry: entry['upload_date'])))
 
