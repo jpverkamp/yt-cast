@@ -71,6 +71,9 @@ def download_thread():
             id = DOWNLOAD_QUEUE.pop()
             logging.info(f'Download queue [{len(DOWNLOAD_QUEUE)}]: {id}')
 
+            if os.path.exists(f'data/{id}.mp3'):
+                continue
+
             url = f'https://www.youtube.com/watch?v={id}'
             logging.info(f'Downloading video at {url}')
             with youtube_dl.YoutubeDL(YDL_OPTS) as ydl:
